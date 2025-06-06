@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from multiprocessing import Pool
+import argparse
 import os
 
 
@@ -145,7 +146,7 @@ class HubInterface:
 
 
 class App:
-    def __init__(self, master: tk.Tk):
+    def __init__(self, master: tk.Tk, ip="192.168.1.100", port=5555):
         self.master = master
         master.title("HUB Interface")
         self.app_running = True
@@ -177,8 +178,8 @@ class App:
         self.ip_entry.pack()
         self.port_entry = tk.Entry(self.ip_frame)
         self.port_entry.pack(side=tk.RIGHT)
-        self.port_entry.insert(0, "5555")
-        self.ip_entry.insert(0, "10.42.0.92")
+        self.port_entry.insert(0, port)
+        self.ip_entry.insert(0, ip)
         # Bind the <Return> key to change_ip
         self.ip_entry.bind("<Return>", self.change_ip_and_port)
         self.port_entry.bind("<Return>", self.change_ip_and_port)
@@ -669,7 +670,14 @@ class App:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="HUB GUI Interface")
+    parser.add_argument("--ip", type=str, default="10.42.0.92", help="HUB IP address")
+    parser.add_argument("--port", type=int, default=5555, help="HUB port number")
+    args = parser.parse_args()
+    
     # hub = HubInterface('10.42.0.100')
+    # hub = HubInterface(args.ip, args.port)
+
     # hub.connect()
     # toSend = {"afe_id": 35, "procedure": "default_get_measurement_last"}
     # response = hub.send(str(toSend).replace("'", "\""))
@@ -708,7 +716,7 @@ if __name__ == "__main__":
         # time.sleep(1)
 
     root = tk.Tk()
-    gui = App(root)
+    gui = App(root,ip=args.ip, port=args.port)
 
     def handle_closing():
         print("CLOSING APP")
