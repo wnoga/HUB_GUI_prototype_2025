@@ -192,3 +192,49 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
+# Local History for Visual Studio Code
+.history/
+
+# Built Visual Studio Code Extensions
+*.vsix
+
+
+# Subversion files.
+**/.svn/
+
+# Windows thumbnail cache files.
+**/Thumbs.db
+
+# Windows folder config files.
+**/[Dd]esktop.ini
+
+# Windows volume root files.
+/$RECYCLE.BIN/
+/System Volume Information/
+
+# macOS resource forks from compressed files.
+**/__MACOSX/
+
+# macOS folder config files.
+**/.DS_Store
+
+# macOS volume root files.
+/.fseventsd
+/.Spotlight-V100
+/.Trashes
+/.VolumeIcon.icns
+
+/log
+/logs
+
+__pycache__
+pycache/*
+pycache
