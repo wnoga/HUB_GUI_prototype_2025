@@ -41,6 +41,9 @@ class HubInterface:
         self.connected = False
         # self.use_receiving_thread = use_receiving_thread
         self.timeout_s = 20
+        # self.receive_thread_should_run = False
+        # self.receive_thread = None
+        # self.receive_queue = queue.Queue()
 
     def connect(self, retry=True):
         """
@@ -58,18 +61,21 @@ class HubInterface:
         # Set a timeout for the socket operations
         self.s.settimeout(self.timeout_s)
 
+        # print("USE RECEIVE THREAD:", self.use_receiving_thread)
         # if self.use_receiving_thread:
         #     # Start a thread to continuously receive data
+        #     self.receive_thread_should_run = True
         #     self.receive_thread = threading.Thread(target=self._receive_loop)
         #     self.receive_thread.daemon = True
         #     self.receive_thread.start()
 
     def _receive_loop(self):
-        while self.connected:
+        while self.receive_thread_should_run:
             data = self._receive()
             if data:
                 self.receive_queue.put(data)
                 print(f"Received: {data}")
+        print("receive_thread_should_run exit")
 
     def send(self, data, waitForResponseData=True):
         """
@@ -83,20 +89,24 @@ class HubInterface:
         """
         print(f"Try send: {data}")
         try:
+            # if not self.connected:
+            # dont block on failed connection try
+            self.connect(retry=False)
             if not self.connected:
-                # dont block on failed connection try
-                self.connect(retry=False)
-                if not self.connected:
-                    return {"status": "ERROR", "message": "Not connected"}
+                return {"status": "ERROR", "message": "Not connected"}
 
             self.s.sendall(data.encode())
             response_data = None
             if waitForResponseData:
                 response_data = self.receive()
-            try:
-                self.s.close()
-            except:
-                pass
+            # try:
+            # self.s.shutdown(socket.SHUT_RDWR)
+            self.s.close()
+            # # except Exception as e:
+            # # print("Error close socket", e)
+
+            # self.connected = False # Connection is usually closed after sending a command and receiving a response
+            #     pass
             self.connected = False
             return {"status": "OK", "data": response_data}
         except Exception as e:
@@ -108,7 +118,7 @@ class HubInterface:
         if not self.connected:
             return None
         try:
-            # self.s.settimeout(1.0)
+            # self.s.settimeout(0.1) # Set a small timeout to not block indefinitely if no data
             chunk = self.s.recv(1024)
             if not chunk:
                 # self.connected = False # Assuming connection is closed
@@ -119,7 +129,7 @@ class HubInterface:
         except socket.timeout:
             return None  # Timeout, no data received yet
 
-    def receive(self):
+    def receive(self): # TODO this does not check for connection status during loop
         toReturn = ''
         # if self.use_receiving_thread:
         #     start_time = time.time()
@@ -130,13 +140,14 @@ class HubInterface:
         #     # print(toReturn)
         #     return toReturn
         # else:
-        start_time = time.time()
-        while (time.time() - start_time) < self.timeout_s:  # Poll for 1 second
+        # Poll for self.timeout_s seconds
+        start_time = time.time() # Start time of polling
+        while (time.time() - start_time) < self.timeout_s: # Polling duration
             tmp = self._receive()
             if tmp:
                 toReturn += tmp
             try:
-                j = json.loads(toReturn)
+                json.loads(toReturn) # Try to parse as JSON
                 return toReturn
             except:
                 pass
@@ -166,7 +177,7 @@ class App:
         self.plot_main_frame = None # Frame to hold matplotlib canvases
 
         self.data_to_plot = {}
-        self.data_to_plot_len_last = 0
+        # self.data_to_plot_len_last = 0
 
         self.label = tk.Label(master, text="Enter HUB IP:")
         self.label.pack()
@@ -183,6 +194,22 @@ class App:
         # Bind the <Return> key to change_ip
         self.ip_entry.bind("<Return>", self.change_ip_and_port)
         self.port_entry.bind("<Return>", self.change_ip_and_port)
+
+        # Automatic data acquisition
+        self.auto_get_data_frame = tk.Frame(master)
+        self.auto_get_data_frame.pack()
+
+        self.auto_get_data_var = tk.StringVar(master)
+        self.auto_get_data_var.set("Disabled") # Default value
+        self.auto_get_data_options = ["Disabled", "5 s", "10 s", "60 s"]
+        self.auto_get_data_dropdown = tk.OptionMenu(self.auto_get_data_frame, self.auto_get_data_var, *self.auto_get_data_options)
+        self.auto_get_data_dropdown.pack(side=tk.LEFT)
+        # Call start_auto_get_data whenever the selection changes
+        self.auto_get_data_var.trace_add("write", self.start_auto_get_data)
+
+
+        self.auto_get_data_label = tk.Label(self.auto_get_data_frame, text="Automatic Get Data All AFEs:")
+        self.auto_get_data_label.pack(side=tk.LEFT)
 
         self.send_label = tk.Label(master, text="Enter JSON command:")
         self.send_label.pack()
@@ -244,13 +271,16 @@ class App:
         self.plot_window = None
         
         
-
+        self.hub = HubInterface(ip=self.ip, port=self.port)
         self.change_ip_and_port()
 
+        self.auto_get_data_after_id = None # To store the ID of the after job for automatic data fetching
+
     def quit(self):
-        if self.hub.connected:
-            self.hub.connected = False
-            # self.hub.s.shutdown(socket.SHUT_RDWR)
+        print("quittt")
+        self.app_running = False # Stop the update_gui loop
+        if self.hub and self.hub.connected:
+            # self.hub.connected = False # This is handled by send closing the socket
             self.hub.s.close()
 
     # def connect_hub(self):
@@ -384,7 +414,7 @@ class App:
     def thread_send_command(self, command_json):
         ip = self.ip
         port = self.port
-        hub = HubInterface(ip=ip, port=port)
+        hub = HubInterface(ip=ip, port=port) # Create a new instance for each thread
         command_str = json.dumps(command_json)
         try:
             response = hub.send(
@@ -419,15 +449,15 @@ class App:
                         self.data_to_plot[device_id] = {}
                     toAppend = response_data.get("retval", None)
                     if toAppend:
-                        # toAppend = pd.DataFrame(toAppend)
-                        # toAppend["device_id"] = device_id
                         for k, v in toAppend.items():
-                            toAppend[k]["device_id"] = device_id
-                            toAppend[k]["gui_timestamp"] = gui_timestamp
-                            toAppend[k]["timestamp_datetime"] = pd.to_datetime(toAppend[k]["timestamp_ms"], unit='ms')
-                            toAppend[k]["gui_datetime"] = pd.to_datetime(toAppend[k]["gui_timestamp"], unit='ms')
+                            # Add device_id and gui_timestamp to each individual measurement dictionary
+                            v["device_id"] = device_id
+                            v["gui_timestamp"] = gui_timestamp # Use the GUI's timestamp of receiving the response
+                            # v["timestamp_datetime"] = pd.to_datetime(v["timestamp_ms"], unit='ms') # Convert HUB timestamp to datetime
+                            v["gui_datetime"] = pd.to_datetime(v["gui_timestamp"], unit='s') # Convert GUI timestamp to datetime
 
-                            df = pd.DataFrame([toAppend[k]])
+                            df = pd.DataFrame([v]) # Create a DataFrame from the single measurement dictionary
+
                             print("X:",self.data_to_plot[device_id].get(k, None))
                             # if not self.data_to_plot[device_id].get(k, None):
                             
@@ -438,7 +468,7 @@ class App:
                             else:
                                 self.data_to_plot[device_id][k] = df
                             self.data_to_plot[device_id][k].sort_values(by="gui_timestamp",inplace=True)
-                            print(self.data_to_plot[device_id][k])
+                            # print(self.data_to_plot[device_id][k])
                             
                         self.plot_data_changed = True # Signal that data has been updated for plotting
 
@@ -514,7 +544,7 @@ class App:
             figures_created = [] # Keep track of figures to close them later
 
             # Create a new figure and axes for each data type (e.g., 'last_data') per device
-            fig, axes = plt.subplots(3, 1, sharex=True, figsize=(7, 6)) # 3 rows, 1 column
+            fig, axes = plt.subplots(3, 1, sharex=True, figsize=(7, 8)) # 3 rows, 1 column
             figures_created.append(fig) # Add figure to list for closing
             color_map = plt.colormaps.get_cmap('tab20')
             # time_column = "timestamp_ms"
@@ -524,7 +554,7 @@ class App:
             for device_id, device_data_types in self.data_to_plot.items():
                 for data_name, df in device_data_types.items():
                     if df.empty:
-                        continue
+                        continue # Skip empty DataFrames
 
                     # fig.suptitle(f"AFE {device_id} - {data_name}", fontsize=10)
                     
@@ -555,7 +585,7 @@ class App:
                         
                         if ax_idx != -1:
                             axes[ax_idx].plot(df[time_column], df[col_name], 
-                                              color=color_map(color), label=f"AFE{device_id} {col_name}")
+                                              color=color_map(color), label=f"AFE{device_id} {col_name}", marker='o', linestyle='-') # Add markers
                             # # axes[ax_idx].set_ylabel(col_name.replace("_", " "), fontsize=8)
                             # axes[ax_idx].tick_params(axis='y', labelsize=7)
                             # axes[ax_idx].grid(True, linestyle=':', alpha=0.7)
@@ -604,7 +634,43 @@ class App:
         #     #     self.canvas.create_rectangle(x_offset + i * (bar_width + 20), 250 - bar_height,
         #     #                                 x_offset + (i + 1) * bar_width + i * 20, 250, fill="blue")
         #     #     self.canvas.create_text(x_offset + i * (bar_width + 20) + bar_width / 2, 260, text=measurements[i], anchor=tk.N)
+    def start_auto_get_data(self, *args): # Accept *args for trace compatibility
+        """
+        Manages the automatic data fetching process based on the dropdown selection.
+        This method is called by the dropdown menu's trace, by scheduled 'after' events,
+        and initially when the app starts.
+        """
+        # Always cancel any existing timer. This handles changes in selection,
+        # ensures only one timer runs, and correctly stops when "Disabled" is chosen.
+        if self.auto_get_data_after_id:
+            self.master.after_cancel(self.auto_get_data_after_id)
+            self.auto_get_data_after_id = None
 
+        selected_option = self.auto_get_data_var.get()
+        print(f"Auto Get Data: Selection changed to '{selected_option}' or timer fired.")
+
+        if selected_option == "Disabled":
+            return # Timer is cancelled, nothing more to do.
+
+        # Extract seconds from the option string (e.g., "5 s" -> 5)
+        try:
+            seconds_str = selected_option.split(" ")[0]
+            interval_ms = int(seconds_str) * 1000
+        except (ValueError, IndexError):
+            print(f"Error parsing interval from '{selected_option}'. Stopping auto-fetch.")
+            return # Do not proceed if interval is invalid; timer is already cancelled.
+
+        # Perform the data fetch immediately since a valid interval is active.
+        self.get_data_for_all_afes()
+
+        # Schedule the next call to this function.
+        print(f"Scheduling next auto data fetch in {interval_ms} ms.")
+        self.auto_get_data_after_id = self.master.after(interval_ms, self.start_auto_get_data)
+    def stop_auto_get_data(self):
+        """Stops the automatic data fetching process."""
+        if self.auto_get_data_after_id:
+            self.master.after_cancel(self.auto_get_data_after_id)
+            self.auto_get_data_after_id = None # Ensure it's cleared
     # This function is triggered by buttons in the GUI. It creates a new thread to send the command so the GUI doesn't freeze.
     def send_predefined_command(self, command_json):
         t = threading.Thread(target=self.thread_send_command,
@@ -662,6 +728,7 @@ class App:
             self.afe_id_new_list = None  # Clear the new list after processing
 
         # Plot data
+        # print("plot_data_changed", self.plot_data_changed)
         if self.plot_data_changed:
             if self.plot_window and tk.Toplevel.winfo_exists(self.plot_window): # Only plot if window is open
                 self.plot()
@@ -721,7 +788,9 @@ if __name__ == "__main__":
     def handle_closing():
         print("CLOSING APP")
         gui.app_running = False
+        gui.stop_auto_get_data() # Stop the automatic data fetching timer
         root.destroy()
+        # exit(0) # This might be necessary depending on thread behavior
 
     def handle_abort(event=None):
         print("HANDLE ABORT (CTRL+C)")
@@ -730,21 +799,14 @@ if __name__ == "__main__":
                   frame: handle_closing())  # Catch Ctrl+C
     # Catch window closing event
     root.protocol("WM_DELETE_WINDOW", handle_closing)
-    root.bind('<Control-q>', handle_abort)
-    # root.mainloop()
+    # root.bind('<Control-q>', handle_abort) # Example binding
 
-    # Regularly call update to allow catching signals
+    # Start the automatic data fetching when the GUI starts
+
+    # Start the GUI event loop
     def run_loop():
         gui.update_gui()
+        gui.start_auto_get_data()
         while gui.app_running:
-            root.update_idletasks()  # removed, seems like not needed
             root.update()
-        print("END run_loop")
-        # except tk.TclError:
-        #     # Tkinter window closed
-        #     print("GUI closed.")
-        #     exit(0)
-    # t = threading.Thread(target=run_loop)
-    # t.start()
-    # t.join()
     run_loop()
