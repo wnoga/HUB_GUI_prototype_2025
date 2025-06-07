@@ -809,4 +809,5 @@ if __name__ == "__main__":
         gui.start_auto_get_data()
         while gui.app_running:
             root.update()
+            time.sleep(0.001)
     run_loop()
