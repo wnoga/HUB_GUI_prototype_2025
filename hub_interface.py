@@ -1,26 +1,15 @@
+import asyncio
 import numpy as np
 import socket
 import threading
 import time
 import queue
 import tkinter as tk
-import signal
 import json
 import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from multiprocessing import Pool
 import argparse
-import os
-
-
-def _appen_data(data):
-    toRet = []
-    for d in data:
-        tmp = d.get("last_data", None)
-        if tmp:
-            toRet.append(tmp)
-    return toRet
 
 
 class HubInterface:
@@ -28,132 +17,137 @@ class HubInterface:
     A class for managing a connection to a hub over a network socket.
     """
 
-    def __init__(self, ip="192.168.1.100", port=5555):
+    def __init__(self, ip="192.168.1.100", port=5555, loop=None):
         """
         Initializes the HubInterface with default values.
         """
         self.ip = ip
         self.port = port
-        self.thread = None
-        # self.receive_queue = queue.Queue()
-        # self.send_queue = queue.Queue()
-        self.s: socket.socket = None
+        self.reader: asyncio.StreamReader = None
+        self.writer: asyncio.StreamWriter = None
         self.connected = False
-        # self.use_receiving_thread = use_receiving_thread
-        self.timeout_s = 20
-        # self.receive_thread_should_run = False
-        # self.receive_thread = None
-        # self.receive_queue = queue.Queue()
+        self.timeout_s = 30  # General timeout for operations
+        self._loop = loop if loop else asyncio.get_event_loop()
 
-    def connect(self, retry=True):
+    async def connect(self):
         """
         Establishes a connection to the hub at the specified IP and port.
         """
-        try:
-            if self.s:
-                self.s.close()
-        except:
-            pass
+        if self.connected:
+            await self.disconnect()
+
         self.connected = False
-        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.s.connect((self.ip, self.port))
-        self.connected = True
-        # Set a timeout for the socket operations
-        self.s.settimeout(self.timeout_s)
+        try:
+            self.reader, self.writer = await asyncio.wait_for(
+                asyncio.open_connection(self.ip, self.port),
+                timeout=self.timeout_s
+            )
+            self.connected = True
+        except asyncio.TimeoutError:
+            print(f"Connection to {self.ip}:{self.port} timed out.")
+        except ConnectionRefusedError:
+            print(f"Connection to {self.ip}:{self.port} refused.")
+        except Exception as e:
+            print(f"Error connecting to {self.ip}:{self.port}: {e}")
 
-        # print("USE RECEIVE THREAD:", self.use_receiving_thread)
-        # if self.use_receiving_thread:
-        #     # Start a thread to continuously receive data
-        #     self.receive_thread_should_run = True
-        #     self.receive_thread = threading.Thread(target=self._receive_loop)
-        #     self.receive_thread.daemon = True
-        #     self.receive_thread.start()
+    async def disconnect(self):
+        if self.writer:
+            try:
+                self.writer.close()
+                await self.writer.wait_closed()
+            except Exception as e:
+                print(f"Error closing writer: {e}")
+        self.reader = None
+        self.writer = None
+        self.connected = False
 
-    def _receive_loop(self):
-        while self.receive_thread_should_run:
-            data = self._receive()
-            if data:
-                self.receive_queue.put(data)
-                print(f"Received: {data}")
-        print("receive_thread_should_run exit")
-
-    def send(self, data, waitForResponseData=True):
+    async def send(self, data_str: str, waitForResponseData=True):
         """
         Sends data to the connected hub and receives a response.
 
         Args:
-            data (str): The data to send.
+            data_str (str): The data to send.
+            waitForResponseData (bool): Whether to wait for and receive response data.
 
         Returns:
             dict or None: The received JSON data as a dictionary, or None if an error occurred.
         """
-        print(f"Try send: {data}")
+        print(f"Try send: {data_str}")
         try:
-            # if not self.connected:
-            # dont block on failed connection try
-            self.connect(retry=False)
+            if not self.connected:
+                await self.connect()
+            
             if not self.connected:
                 return {"status": "ERROR", "message": "Not connected"}
 
-            self.s.sendall(data.encode())
+            self.writer.write(f"{data_str}\r\n".encode())
+            await self.writer.drain()
+
             response_data = None
             if waitForResponseData:
-                response_data = self.receive()
-            # try:
-            # self.s.shutdown(socket.SHUT_RDWR)
-            self.s.close()
-            # # except Exception as e:
-            # # print("Error close socket", e)
+                response_data = await self.receive()
 
-            # self.connected = False # Connection is usually closed after sending a command and receiving a response
-            #     pass
-            self.connected = False
+            await self.disconnect()
             return {"status": "OK", "data": response_data}
+        except asyncio.TimeoutError:
+            print(f"Timeout sending/receiving data for: {data_str}")
+            await self.disconnect()
+            return {"status": "ERROR", "message": "Operation timed out"}
         except Exception as e:
             print(f"Error sending data: {e}")
-            self.connected = False
+            await self.disconnect()
             return {"status": "ERROR", "message": str(e)}
 
-    def _receive(self):
-        if not self.connected:
+    async def receive(self):
+        if not self.connected or not self.reader:
             return None
-        try:
-            # self.s.settimeout(0.1) # Set a small timeout to not block indefinitely if no data
-            chunk = self.s.recv(1024)
-            if not chunk:
-                # self.connected = False # Assuming connection is closed
-                return None
-            # while True:
-                # Continue receiving if more data is available
-            return chunk.decode()
-        except socket.timeout:
-            return None  # Timeout, no data received yet
+            
+        buffer = bytearray()
+        loop = asyncio.get_running_loop()
+        start_time = loop.time()
 
-    def receive(self): # TODO this does not check for connection status during loop
-        toReturn = ''
-        # if self.use_receiving_thread:
-        #     start_time = time.time()
-        #     while self.receive_queue.empty() and (time.time() - start_time) < 5.0:  # Poll for 1 second
-        #         pass
-        #     while not self.receive_queue.empty():
-        #         toReturn += self.receive_queue.get()
-        #     # print(toReturn)
-        #     return toReturn
-        # else:
-        # Poll for self.timeout_s seconds
-        start_time = time.time() # Start time of polling
-        while (time.time() - start_time) < self.timeout_s: # Polling duration
-            tmp = self._receive()
-            if tmp:
-                toReturn += tmp
-            try:
-                json.loads(toReturn) # Try to parse as JSON
-                return toReturn
-            except:
-                pass
-        if toReturn == '':
+        try:
+            while True:
+                remaining_time = self.timeout_s - (loop.time() - start_time)
+                if remaining_time <= 0:
+                    print(f"Receive timeout with partial data: {buffer.decode(errors='ignore')[:100]}" if buffer else "Receive timeout, no data.")
+                    return buffer.decode(errors='ignore') if buffer else None
+
+                try:
+                    chunk_timeout = min(2.0, remaining_time) # Read attempt timeout
+                    chunk = await asyncio.wait_for(self.reader.read(1024), timeout=chunk_timeout)
+                    
+                    if not chunk: # EOF
+                        self.connected = False
+                        return buffer.decode(errors='ignore') if buffer else None
+                    
+                    buffer.extend(chunk)
+                    try:
+                        decoded_data = buffer.decode()
+                        json.loads(decoded_data) # Check if valid JSON
+                        return decoded_data
+                    except UnicodeDecodeError: # Incomplete multi-byte char
+                        if (loop.time() - start_time) >= self.timeout_s: return None
+                    except json.JSONDecodeError: # Valid UTF-8, but not JSON yet
+                        if (loop.time() - start_time) >= self.timeout_s:
+                            print(f"Receive timeout, incomplete JSON: {buffer.decode(errors='ignore')[:100]}")
+                            return buffer.decode(errors='ignore') # Return what we have
+                except asyncio.TimeoutError: # Timeout for a chunk
+                    pass # Outer loop checks overall timeout
+        except ConnectionResetError:
+            print("Connection reset by peer during receive.")
+            self.connected = False
+            return buffer.decode(errors='ignore') if buffer else None
+        except Exception as e:
+            print(f"Error during receive: {e}")
+            self.connected = False
+            return buffer.decode(errors='ignore') if buffer else None
+        
+        # Fallback, should ideally be handled by timeout logic above
+        if buffer:
+            return buffer.decode(errors='ignore')
+        else:
             return None
-        return toReturn
 
 
 class App:
@@ -161,11 +155,17 @@ class App:
         self.master = master
         master.title("HUB Interface")
         self.app_running = True
+        
+        # Asyncio loop setup
+        self.aio_loop = asyncio.new_event_loop()
+        self.aio_thread = threading.Thread(target=self._run_aio_loop, daemon=True)
+        self.aio_thread.start()
 
         self.ip = None
-        self.hub = None
+        # self.hub = None # HubInterface instances created on demand
 
         self.port = None
+
 
         self.response_text_queue = queue.Queue()
 
@@ -176,8 +176,7 @@ class App:
         self.plot_data_changed = False # Flag to indicate if new data is available for plotting
         self.plot_main_frame = None # Frame to hold matplotlib canvases
 
-        self.data_to_plot = {}
-        # self.data_to_plot_len_last = 0
+        self.data_to_plot = {} # Key: device_id, Value: {measurement_name: DataFrame}
 
         self.label = tk.Label(master, text="Enter HUB IP:")
         self.label.pack()
@@ -270,113 +269,41 @@ class App:
         self.plot_button.pack()
         self.plot_window = None
         
-        
-        self.hub = HubInterface(ip=self.ip, port=self.port)
+        # Initialize ip and port from entries, then create HubInterface
         self.change_ip_and_port()
 
-        self.auto_get_data_after_id = None # To store the ID of the after job for automatic data fetching
+        self.auto_get_data_future = None # To store the asyncio future for auto data fetching
+
+    def _run_aio_loop(self):
+        asyncio.set_event_loop(self.aio_loop)
+        try:
+            self.aio_loop.run_forever()
+        finally:
+            # Clean up any tasks that might be pending if loop is stopped abruptly
+            # For tasks like auto_get_data_future, cancellation should be handled in quit()
+            self.aio_loop.close()
 
     def quit(self):
         print("quittt")
         self.app_running = False # Stop the update_gui loop
-        if self.hub and self.hub.connected:
-            # self.hub.connected = False # This is handled by send closing the socket
-            self.hub.s.close()
+        self.stop_auto_get_data() # Stop the automatic data fetching task
 
-    # def connect_hub(self):
-    #     try:
-    #         self.hub.connect()
-    #         self.response_text.insert(
-    #             tk.END, f"Connected to HUB at {self.hub.ip}:{self.hub.port}\n")
-    #         self.update_gui()  # Start polling for messages
-    #     except Exception as e:
-    #         self.response_text.insert(
-    #             tk.END, f"Failed to connect to HUB: {e}\n")
-
-    # def disconnect_hub(self):
-    #     if self.hub.connected:
-    #         self.hub.connected = False
-    #         self.hub.s.close()
-    #         self.response_text.insert(tk.END, "Disconnected from HUB.\n")
-
-    # def update_afe_dropdown(self, afe_ids):
-    #     menu = self.afe_id_dropdown["menu"]
-    #     menu.delete(0, "end")  # Clear previous items
-    #     if afe_ids:
-    #         sorted_ids = sorted(afe_ids, key=int) if all(
-    #             id.isdigit() for id in afe_ids) else sorted(afe_ids)
-    #         self.afe_id_var.set(sorted_ids[0])  # Set default selection
-    #         for afe_id_str in sorted_ids:
-    #             menu.add_command(label=afe_id_str, command=tk._setit(
-    #                 self.afe_id_var, afe_id_str))
-    #     else:
-    #         self.afe_id_var.set("N/A")  # No AFEs found
-    #         menu.add_command(
-    #             label="N/A", command=tk._setit(self.afe_id_var, "N/A"))
-
-    # def refresh_afe_list(self):
-    #     """Sends a command to the hub to get the list of connected AFEs and updates the dropdown."""
-    #     try:
-    #         command_json = {"procedure": "get_all_afe_configuration"}
-    #         command_str = json.dumps(command_json)
-    #         response = self.hub.send(command_str)
-    #         self.response_text.insert(tk.END, f"Sent: {command_str}\n")
-    #         # The actual AFE data will arrive via the receiving thread/polling
-
-    #     except Exception as e:
-    #         self.response_text.insert(
-    #             tk.END, f"Error refreshing AFE list: {e}\n")
-
-    # def update_gui(self):
-    #     """Polls the receive queue for messages and updates the GUI."""
-    #     print("update ghuiii")
-    #     while not self.hub.receive_queue.empty():
-    #         message_raw = self.hub.receive_queue.get()
-    #         try:
-    #             message_json = json.loads(message_raw)
-    #             self.response_text.insert(
-    #                 tk.END, f"Received: {json.dumps(message_json)}\n")
-
-    #             # Check if the received message is AFE configuration data
-    #             # AFE configuration data is expected to be a dictionary where keys are AFE IDs (strings)
-    #             # and values are their configurations.
-    #             # Example: {'36': {'ID': 36, ...}, '35': {'ID': 35, ...}}
-    #             # We can identify this by checking if the values are also dictionaries and contain 'ID'
-    #             is_afe_config_data = all(
-    #                 isinstance(val, dict) and 'ID' in val for val in message_json.values()
-    #             )
-
-    #             if is_afe_config_data:
-    #                 afe_ids_from_response = list(message_json.keys())
-    #                 self.update_afe_dropdown(afe_ids_from_response)
-
-    #         except json.JSONDecodeError:
-    #             self.response_text.insert(
-    #                 tk.END, f"Received raw: {message_raw}\n")
-    #         except Exception as e:
-    #             self.response_text.insert(
-    #                 tk.END, f"Error processing received message: {e}\n")
-
-    #     # Schedule the next poll
-    #     self.master.after(100, self.update_gui)
+        if self.aio_loop.is_running():
+            self.aio_loop.call_soon_threadsafe(self.aio_loop.stop)
+        # self.aio_thread.join(timeout=2) # Wait for the asyncio thread to finish
 
     def send_command(self):
-        if not self.hub.connected:
-            self.hub.connect(retry=False)
-            if not self.hub.connected:
-                self.response_text.insert(tk.END, "Not connected to HUB.\n")
-                return
-
         command_str = self.command_entry.get()
         try:
             command_json = json.loads(command_str)
-            response = self.hub.send(json.dumps(command_json))
-            self.response_text.insert(tk.END, f"Sent: {command_str}\n")
-            # self.response_text.insert(tk.END, f"Received: {response}\n")
+            asyncio.run_coroutine_threadsafe(
+                self.async_handle_command(command_json),
+                self.aio_loop
+            )
         except json.JSONDecodeError:
-            self.response_text.insert(tk.END, "Invalid JSON format\n")
+            self.response_text_queue.put((tk.END, "Invalid JSON format\n"))
         except Exception as e:
-            self.response_text.insert(tk.END, f"Error sending command: {e}\n")
+            self.response_text_queue.put((tk.END, f"Error preparing to send command: {e}\n"))
 
     def change_ip_and_port(self, event=None):
         """Changes the HUB IP address."""
@@ -385,11 +312,11 @@ class App:
 
         self.ip = new_ip
         self.port = new_port
-
-        # self.hub.ip = new_ip
-        # self.hub.connected = False  # Force reconnection on next send
-        self.response_text.insert(
-            tk.END, f"HUB IP changed to {new_ip}:{new_port}. Connection will be re-established on next command.\n")
+        
+        # HubInterface instances are created on-demand in async_handle_command
+        # using self.ip and self.port. So, this change will take effect for subsequent commands.
+        self.response_text_queue.put(
+            (tk.END, f"HUB IP changed to {new_ip}:{new_port}. New commands will use this address.\n"))
 
     def isThisCommandReturnData(self, command):
         # Add procedures that are expected to return data here
@@ -406,105 +333,78 @@ class App:
         ]
         return command in data_returning_commands
 
-    # def shared_get(self, entry=None):
-    #     # print("shared_get", entry)
-    #     # self.shared_entry_get = entry.get()
-    #     self.shared_entry_get = self.ip_entry.get()
-
-    def thread_send_command(self, command_json):
-        ip = self.ip
-        port = self.port
-        hub = HubInterface(ip=ip, port=port) # Create a new instance for each thread
+    async def async_handle_command(self, command_json):
+        # Create a new HubInterface instance for each command.
+        # This matches original threading logic and avoids shared state issues.
+        hub = HubInterface(ip=self.ip, port=self.port, loop=self.aio_loop)
         command_str = json.dumps(command_json)
         try:
-            response = hub.send(
-                command_str, waitForResponseData=self.isThisCommandReturnData(command_json["procedure"]))
+            response = await hub.send(
+                command_str, waitForResponseData=self.isThisCommandReturnData(command_json.get("procedure"))
+            )
             gui_timestamp = time.time()
             self.response_text_queue.put(
                 (tk.END, f"Sent: {command_str} -> {response.get("status", "ERROR")}\n"))
+            
             procedure = command_json.get("procedure", None)
-            if procedure == None:
-                print("No procedure specified")
-            elif procedure == "get_all_afe_configuration":
-                if not response.get("data"):
-                    print("No response data")
-                    return
-                response_data = json.loads(response["data"])
-                afe_ids_from_response = list(response_data.keys())
-                if afe_ids_from_response:
-                    # Sort IDs for consistent order in dropdown, e.g., numerically
-                    try:
-                        afe_ids_sorted = sorted(afe_ids_from_response, key=int)
-                    except ValueError:  # Handle non-integer IDs if they can occur
-                        afe_ids_sorted = sorted(afe_ids_from_response)
-                    self.afe_id_new_list = afe_ids_sorted
+            print(f"Procedure: {procedure} -> {response}")
+            if response.get("status") == "OK" and response.get("data"):
+                response_data_str = response["data"]
+                try:
+                    response_data_json = json.loads(response_data_str)
 
-            elif procedure == "default_get_measurement_last":
-                # print("default_get_measurement_last")
-                # print(response)
-                response_data = json.loads(response["data"])
-                device_id = response_data.get("device_id", None)
-                if device_id:
-                    if not self.data_to_plot.get(device_id, None):
-                        self.data_to_plot[device_id] = {}
-                    toAppend = response_data.get("retval", None)
-                    if toAppend:
-                        for k, v in toAppend.items():
-                            # Add device_id and gui_timestamp to each individual measurement dictionary
-                            v["device_id"] = device_id
-                            v["gui_timestamp"] = gui_timestamp # Use the GUI's timestamp of receiving the response
-                            # v["timestamp_datetime"] = pd.to_datetime(v["timestamp_ms"], unit='ms') # Convert HUB timestamp to datetime
-                            v["gui_datetime"] = pd.to_datetime(v["gui_timestamp"], unit='s') # Convert GUI timestamp to datetime
+                    if procedure == "get_all_afe_configuration":
+                        afe_ids_from_response = list(response_data_json.keys())
+                        if afe_ids_from_response:
+                            try:
+                                afe_ids_sorted = sorted(afe_ids_from_response, key=int)
+                            except ValueError:
+                                afe_ids_sorted = sorted(afe_ids_from_response)
+                            self.afe_id_new_list = afe_ids_sorted # Picked up by update_gui
 
-                            df = pd.DataFrame([v]) # Create a DataFrame from the single measurement dictionary
-
-                            print("X:",self.data_to_plot[device_id].get(k, None))
-                            # if not self.data_to_plot[device_id].get(k, None):
+                    elif procedure == "default_get_measurement_last":
+                        device_id = response_data_json.get("device_id", None)
+                        if device_id:
+                            if device_id not in self.data_to_plot:
+                                self.data_to_plot[device_id] = {}
                             
-                            if k in self.data_to_plot[device_id]:
-                                # print(self.data_to_plot[device_id][k])
-                                # print(df)
-                                self.data_to_plot[device_id][k] = pd.concat([self.data_to_plot[device_id][k],df],ignore_index=True)
-                            else:
-                                self.data_to_plot[device_id][k] = df
-                            self.data_to_plot[device_id][k].sort_values(by="gui_timestamp",inplace=True)
-                            # print(self.data_to_plot[device_id][k])
-                            
-                        self.plot_data_changed = True # Signal that data has been updated for plotting
+                            toAppend = response_data_json.get("retval", None)
+                            if toAppend and isinstance(toAppend, dict):
+                                for k, v_measurement_dict in toAppend.items():
+                                    if not isinstance(v_measurement_dict, dict):
+                                        print(f"Warning: Expected dict for measurement {k}, got {type(v_measurement_dict)}")
+                                        continue
+                                    
+                                    v_measurement_dict["device_id"] = device_id
+                                    v_measurement_dict["gui_timestamp"] = gui_timestamp
+                                    v_measurement_dict["gui_datetime"] = pd.to_datetime(v_measurement_dict["gui_timestamp"], unit='s')
 
-                            # # self.data_to_plot[device_id].
-                            # if not self.data_to_plot[k]:
-                            #     self.data_to_plot[k] = [toAppend[k]]
-                            # else:
-                            #     pd.concat([self.data_to_plot[k], toAppend[k]], ignore_index=True)
-                            # self.data_to_plot[k].sort_values(["timestamp_ms"], inplace=True)
+                                    df = pd.DataFrame([v_measurement_dict])
 
-                        # self.data_to_plot[device_id]
-                        # print(toAppend)
+                                    if k in self.data_to_plot[device_id]:
+                                        self.data_to_plot[device_id][k] = pd.concat(
+                                            [self.data_to_plot[device_id][k], df], ignore_index=True
+                                        )
+                                    else:
+                                        self.data_to_plot[device_id][k] = df
+                                    
+                                    self.data_to_plot[device_id][k].sort_values(by="gui_timestamp", inplace=True)
+                                self.plot_data_changed = True
+                    # Other procedures that return data can be handled here similarly.
+                    # The original code had specific self.hub.receive() calls for some procedures after send.
+                    # This is now handled by HubInterface.send(waitForResponseData=True).
+                    # If a procedure has a more complex multi-stage response, HubInterface or this handler would need adjustment.
 
-                        # self.data_to_plot[device_id].append(toAppend)
-
-                    # self.data_to_plot
-                    # self.plot_data(response_data) # Plot data in separate window
-                        # (tk.END, f"Measurement Data: {json.dumps(response_data)}\n"))
-                    # self.response_text.insert(
-                    #     tk.END, f"Measurement Data: {json.loads(response_data)}\n")
-            elif procedure == "default_procedure":
-                response = self.hub.receive()
-                self.response_text.insert(
-                    tk.END, f"Default Procedure Response: {json.loads(response)}\n")
-            elif procedure == "default_set_dac":
-                response = self.hub.receive()
-                self.response_text.insert(
-                    tk.END, f"Set DAC Response: {json.loads(response)}\n")
-            elif procedure == "default_hv_set":
-                response = self.hub.receive()
-                self.response_text.insert(
-                    tk.END, f"HV Set Response: {json.loads(response)}\n")
-
+                except json.JSONDecodeError as e:
+                    self.response_text_queue.put((tk.END, f"Error decoding JSON response for {command_str}: {e}\nData: {response_data_str[:200]}\n"))
+                except TypeError: # If response["data"] is None or not string
+                    self.response_text_queue.put((tk.END, f"No data or invalid data type in response for {command_str}\n"))
+            elif response.get("status") == "ERROR":
+                 self.response_text_queue.put((tk.END, f"HUB Error for {command_str}: {response.get('message')}\n"))
+                 
         except Exception as e:
             self.response_text_queue.put(
-                (tk.END, f"Error sending command: {e}\n"))
+                (tk.END, f"Error in async_handle_command for {command_str}: {e}\n"))
 
     def open_plot_window(self):
         """Opens a new window for plotting data."""
@@ -634,55 +534,94 @@ class App:
         #     #     self.canvas.create_rectangle(x_offset + i * (bar_width + 20), 250 - bar_height,
         #     #                                 x_offset + (i + 1) * bar_width + i * 20, 250, fill="blue")
         #     #     self.canvas.create_text(x_offset + i * (bar_width + 20) + bar_width / 2, 260, text=measurements[i], anchor=tk.N)
+
+    async def _auto_get_data_loop(self, interval_seconds):
+        """Asyncio task for periodically fetching data."""
+        try:
+            while self.app_running: # Check app_running as well
+                if self.auto_get_data_var.get() == "Disabled":
+                    break # Exit if disabled
+                
+                print(f"Auto-fetching data for all AFEs (interval: {interval_seconds}s)")
+                if self.afe_id_all:
+                    for afe_id_str in self.afe_id_all:
+                        try:
+                            # Sequentially await each command to avoid overwhelming.
+                            # Could be done concurrently with asyncio.gather if hub supports it well.
+                            await self.async_handle_command({
+                                "afe_id": int(afe_id_str), 
+                                "procedure": "default_get_measurement_last"
+                            })
+                        except ValueError:
+                            self.response_text_queue.put((tk.END, f"Invalid AFE ID for auto 'Get Data All': {afe_id_str}\n"))
+                        except Exception as e:
+                            self.response_text_queue.put((tk.END, f"Error auto-fetching for AFE {afe_id_str}: {e}\n"))
+                else:
+                    self.response_text_queue.put((tk.END, "Auto-fetch: No AFE IDs known. Press 'Get Config' first.\n"))
+                
+                await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            print("Auto-get data loop cancelled.")
+        except Exception as e:
+            print(f"Error in auto_get_data_loop: {e}")
+            self.response_text_queue.put((tk.END, f"Critical error in auto_get_data_loop: {e}\n"))
+
     def start_auto_get_data(self, *args): # Accept *args for trace compatibility
         """
         Manages the automatic data fetching process based on the dropdown selection.
-        This method is called by the dropdown menu's trace, by scheduled 'after' events,
-        and initially when the app starts.
         """
-        # Always cancel any existing timer. This handles changes in selection,
-        # ensures only one timer runs, and correctly stops when "Disabled" is chosen.
-        if self.auto_get_data_after_id:
-            self.master.after_cancel(self.auto_get_data_after_id)
-            self.auto_get_data_after_id = None
+        if hasattr(self, 'auto_get_data_future') and self.auto_get_data_future:
+            if not self.auto_get_data_future.done():
+                self.auto_get_data_future.cancel()
+            self.auto_get_data_future = None
 
         selected_option = self.auto_get_data_var.get()
         print(f"Auto Get Data: Selection changed to '{selected_option}' or timer fired.")
 
         if selected_option == "Disabled":
-            return # Timer is cancelled, nothing more to do.
+            return
 
         # Extract seconds from the option string (e.g., "5 s" -> 5)
         try:
             seconds_str = selected_option.split(" ")[0]
-            interval_ms = int(seconds_str) * 1000
+            interval_s = int(seconds_str)
+            if interval_s <= 0:
+                print("Auto-fetch interval must be positive.")
+                return
         except (ValueError, IndexError):
             print(f"Error parsing interval from '{selected_option}'. Stopping auto-fetch.")
-            return # Do not proceed if interval is invalid; timer is already cancelled.
+            return
 
-        # Perform the data fetch immediately since a valid interval is active.
-        self.get_data_for_all_afes()
+        # Schedule the asyncio task
+        self.auto_get_data_future = asyncio.run_coroutine_threadsafe(
+            self._auto_get_data_loop(interval_s),
+            self.aio_loop
+        )
+        print(f"Scheduled auto data fetch every {interval_s} s.")
 
-        # Schedule the next call to this function.
-        print(f"Scheduling next auto data fetch in {interval_ms} ms.")
-        self.auto_get_data_after_id = self.master.after(interval_ms, self.start_auto_get_data)
     def stop_auto_get_data(self):
         """Stops the automatic data fetching process."""
-        if self.auto_get_data_after_id:
-            self.master.after_cancel(self.auto_get_data_after_id)
-            self.auto_get_data_after_id = None # Ensure it's cleared
-    # This function is triggered by buttons in the GUI. It creates a new thread to send the command so the GUI doesn't freeze.
+        if hasattr(self, 'auto_get_data_future') and self.auto_get_data_future:
+            if not self.auto_get_data_future.done():
+                self.auto_get_data_future.cancel()
+            self.auto_get_data_future = None
+            print("Auto data fetching stopped.")
+
     def send_predefined_command(self, command_json):
-        t = threading.Thread(target=self.thread_send_command,
-                             args=(command_json,), daemon=True)
-        t.start()
+        asyncio.run_coroutine_threadsafe(
+            self.async_handle_command(command_json), 
+            self.aio_loop
+        )
 
     def get_data_for_all_afes(self):
         """Sends 'default_get_measurement_last' to all known AFE IDs."""
         if self.afe_id_all:
             for afe_id_str in self.afe_id_all:
                 try:
-                    self.send_predefined_command({"afe_id": int(afe_id_str), "procedure": "default_get_measurement_last"})
+                    command_json = {"afe_id": int(afe_id_str), "procedure": "default_get_measurement_last"}
+                    asyncio.run_coroutine_threadsafe( # Schedule each one
+                        self.async_handle_command(command_json), self.aio_loop
+                    )
                 except ValueError:
                     self.response_text_queue.put((tk.END, f"Invalid AFE ID for 'Get Data All': {afe_id_str}\n"))
         else:
@@ -733,7 +672,8 @@ class App:
             if self.plot_window and tk.Toplevel.winfo_exists(self.plot_window): # Only plot if window is open
                 self.plot()
             self.plot_data_changed = False # Reset flag after plotting attempt
-        self.master.after(100, self.update_gui)  # Poll every 100ms
+        if self.app_running: # Continue polling only if app is running
+            self.master.after(100, self.update_gui)  # Poll every 100ms
 
 
 if __name__ == "__main__":
@@ -741,73 +681,35 @@ if __name__ == "__main__":
     parser.add_argument("--ip", type=str, default="10.42.0.92", help="HUB IP address")
     parser.add_argument("--port", type=int, default=5555, help="HUB port number")
     args = parser.parse_args()
-    
-    # hub = HubInterface('10.42.0.100')
-    # hub = HubInterface(args.ip, args.port)
-
-    # hub.connect()
-    # toSend = {"afe_id": 35, "procedure": "default_get_measurement_last"}
-    # response = hub.send(str(toSend).replace("'", "\""))
-    # print("Response:", response)
-
-    # toSend = {"procedure": "get_all_afe_configuration"}
-    # response = hub.send(str(toSend).replace("'", "\""))
-    # print("Response:", response)
-    state = 0
-    while False:
-        time.sleep(1)
-        if state == 0:
-            toSend = {"afe_id": 35, "procedure": "default_full"}
-            response = hub.send(str(toSend).replace("'", "\""))
-            try:
-                print("Response:", response)
-                if "status" in response:
-                    if response["status"] == "OK":
-                        state = 1
-            except Exception as e:
-                print("Error:", e, response)
-
-        elif state == 1:
-            toSend = {"afe_id": 35, "procedure": "default_get_measurement_last"}
-            response = hub.send(str(toSend).replace("'", "\""))
-            print("Response:", response)
-            time.sleep(4)
-    if False:
-        # if 1:
-        # hub.send(f'{"test":{np.round(np.random.uniform(0.0,1.0),2)}}')
-        toSend = {"test": np.round(np.random.uniform(0.0, 1.0), 2)}
-        # toSend = json(toSend)
-        toSend = str(toSend).replace("'", "\"")
-        hub.send(toSend)
-        time.sleep(4)
-        # time.sleep(1)
 
     root = tk.Tk()
-    gui = App(root,ip=args.ip, port=args.port)
+    gui = App(root, ip=args.ip, port=args.port)
 
     def handle_closing():
         print("CLOSING APP")
-        gui.app_running = False
-        gui.stop_auto_get_data() # Stop the automatic data fetching timer
+        gui.quit() # This now sets app_running to False, stops auto_get_data, and signals asyncio loop to stop
         root.destroy()
-        # exit(0) # This might be necessary depending on thread behavior
 
-    def handle_abort(event=None):
-        print("HANDLE ABORT (CTRL+C)")
+    # SIGINT (Ctrl+C) is usually handled by Tkinter's mainloop or can be
+    # more complex with threads. For GUI apps, WM_DELETE_WINDOW is primary.
+    # If running from a terminal where Ctrl+C is expected to quit,
+    # ensure threads are handled. Python's default SIGINT handler might
+    # raise KeyboardInterrupt in the main thread.
+    # For simplicity here, we rely on window close.
+    # import signal
+    # signal.signal(signal.SIGINT, lambda signum, frame: handle_closing())
 
-    signal.signal(signal.SIGINT, lambda signum,
-                  frame: handle_closing())  # Catch Ctrl+C
-    # Catch window closing event
     root.protocol("WM_DELETE_WINDOW", handle_closing)
-    # root.bind('<Control-q>', handle_abort) # Example binding
 
-    # Start the automatic data fetching when the GUI starts
+    gui.update_gui()  # Start the GUI update cycle
+    # The auto_get_data_var trace will call start_auto_get_data if a non-"Disabled" option is default or selected.
 
-    # Start the GUI event loop
-    def run_loop():
-        gui.update_gui()
-        gui.start_auto_get_data()
-        while gui.app_running:
-            root.update()
-            time.sleep(0.001)
-    run_loop()
+    root.mainloop()
+
+    # After root.mainloop() exits (due to root.destroy()), join the aio_thread
+    if gui.aio_thread.is_alive():
+        print("Waiting for asyncio thread to finish...")
+        gui.aio_thread.join(timeout=5) 
+        if gui.aio_thread.is_alive():
+            print("Asyncio thread did not finish in time.")
+    print("Application closed.")
