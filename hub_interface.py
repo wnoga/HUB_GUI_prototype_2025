@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import argparse
+import seaborn as sns
 
 
 class HubInterface:
@@ -149,12 +150,49 @@ class HubInterface:
         else:
             return None
 
+class AFE:
+    """
+    A class representing an AFE (Analog Front-End) device.
+    Could be used to store configuration or state specific to an AFE.
+    """
+    def __init__(self, afe_id):
+        self.afe_id = afe_id
+        self.config = {} # To store configuration data
+        self.measurements = {} # To store measurement data
+    
+    def add_measurement(self, data_json):
+        # if self.measurements.get(measurement_name) is None:
+        #     self.measurements[measurement_name] = pd.DataFrame({"time":[],"value":[]})
+        # # self.measurements[measurement_name]
+        # print(self.afe_id, measurement_name, data)
+        # print(data_json)
+        if self.measurements.get("last_data") is None:
+            self.measurements["last_data"] = pd.DataFrame()
+        retval = data_json.get("retval", None)
+        if retval is None or not isinstance(retval, dict):
+            return
+        
+        last_data = retval.get("last_data")
+        if last_data is not None:
+            # Convert last_data (which is a dict) to a DataFrame and append/update
+            new_df = pd.DataFrame([last_data])
+            new_df["gui_timestamp"] = time.time()
+            new_df["gui_datetime"] = pd.to_datetime(new_df["gui_timestamp"], unit='s')
+            self.measurements["last_data"] = pd.concat([self.measurements["last_data"], new_df], ignore_index=True)
+            # self.measurements.update("last_data", new_df)
+            # print(self.measurements[""])
+        # for k in self.measurements.keys():
+        #     print(k, self.measurements[k])
+
+        
 
 class App:
     def __init__(self, master: tk.Tk, ip="192.168.1.100", port=5555):
         self.master = master
         master.title("HUB Interface")
         self.app_running = True
+        
+        self.afe = {} # List of AFE objects
         
         # Asyncio loop setup
         self.aio_loop = asyncio.new_event_loop()
@@ -257,6 +295,40 @@ class App:
             self.buttons_frame, text="Get Data All AFEs", command=self.get_data_for_all_afes)
         self.get_all_data_button.pack(side=tk.LEFT)
 
+        self.show_settings_button = tk.Button(
+            self.buttons_frame, text="Show Settings", command=self.show_settings_popup_by_id)
+        self.show_settings_button.pack(side=tk.LEFT)
+
+
+        # Add controls for setting HV voltage
+        self.hv_set_frame = tk.Frame(master)
+        self.hv_set_frame.pack()
+
+        self.hv_set_label = tk.Label(self.hv_set_frame, text="Set HV Voltage (V):")
+        self.hv_set_label.pack(side=tk.LEFT)
+
+        self.hv_voltage_entry = tk.Entry(self.hv_set_frame, width=10)
+        self.hv_voltage_entry.insert(0, "0") # Default value
+        self.hv_voltage_entry.pack(side=tk.LEFT)
+
+        # Add option menu for HV control mode (master/slave/both)
+        self.hv_mode_var = tk.StringVar(master)
+        self.hv_mode_var.set("Both") # Default value
+        self.hv_mode_options = {
+            "Master": 0x01,
+            "Slave": 0x02,
+            "Both": 0x03
+        }
+        self.hv_mode_dropdown = tk.OptionMenu(self.hv_set_frame, self.hv_mode_var, *self.hv_mode_options.keys())
+        self.hv_mode_dropdown.pack(side=tk.LEFT)
+
+        self.set_hv_button = tk.Button(
+            self.hv_set_frame, text="Set HV",
+            command=self.set_hv_voltage)
+        self.set_hv_button.pack(side=tk.LEFT)
+        
+        
+
         self.response_label = tk.Label(master, text="Response:")
         self.response_label.pack()
         self.response_text = tk.Text(master, height=10, width=50)
@@ -347,49 +419,137 @@ class App:
                 (tk.END, f"Sent: {command_str} -> {response.get("status", "ERROR")}\n"))
             
             procedure = command_json.get("procedure", None)
-            print(f"Procedure: {procedure} -> {response}")
+            # print(f"Procedure: {procedure} -> {response}")
             if response.get("status") == "OK" and response.get("data"):
                 response_data_str = response["data"]
                 try:
+
                     response_data_json = json.loads(response_data_str)
-
                     if procedure == "get_all_afe_configuration":
-                        afe_ids_from_response = list(response_data_json.keys())
-                        if afe_ids_from_response:
-                            try:
-                                afe_ids_sorted = sorted(afe_ids_from_response, key=int)
-                            except ValueError:
-                                afe_ids_sorted = sorted(afe_ids_from_response)
-                            self.afe_id_new_list = afe_ids_sorted # Picked up by update_gui
-
+                        # print(response_data_json)
+                        for k in response_data_json.keys():
+                            if k not in self.afe:
+                                self.afe[k] = AFE(k)
+                                self.afe[k].config = response_data_json[k]
+                        afe_id_all = self.afe_id_all
+                        self.afe_id_all = list(self.afe.keys())
+                        if self.afe_id_all != afe_id_all:
+                            self.afe_id_new_list = self.afe_id_all
+                        # for afe in self.afe.values():
+                        #     print(afe.config)
+                    
                     elif procedure == "default_get_measurement_last":
                         device_id = response_data_json.get("device_id", None)
-                        if device_id:
-                            if device_id not in self.data_to_plot:
-                                self.data_to_plot[device_id] = {}
+                        # print(device_id, "default_get_measurement_last")
+                        afe = self.afe.get(str(device_id), None)
+                        if afe is None:
+                            print("No afe found: ", device_id)
+                            return
+                        #     self.afe.update({device_id: AFE(device_id)})
+                        #     afe = self.afe[device_id]
+                        # afe = self.afe.get(device_id, None)
+                        # print(afe_id)
+                        afe.add_measurement(response_data_json)
+                        self.plot_data_changed = True
                             
-                            toAppend = response_data_json.get("retval", None)
-                            if toAppend and isinstance(toAppend, dict):
-                                for k, v_measurement_dict in toAppend.items():
-                                    if not isinstance(v_measurement_dict, dict):
-                                        print(f"Warning: Expected dict for measurement {k}, got {type(v_measurement_dict)}")
-                                        continue
-                                    
-                                    v_measurement_dict["device_id"] = device_id
-                                    v_measurement_dict["gui_timestamp"] = gui_timestamp
-                                    v_measurement_dict["gui_datetime"] = pd.to_datetime(v_measurement_dict["gui_timestamp"], unit='s')
 
-                                    df = pd.DataFrame([v_measurement_dict])
 
-                                    if k in self.data_to_plot[device_id]:
-                                        self.data_to_plot[device_id][k] = pd.concat(
-                                            [self.data_to_plot[device_id][k], df], ignore_index=True
-                                        )
-                                    else:
-                                        self.data_to_plot[device_id][k] = df
+                    # elif procedure == "default_get_measurement_last":
+                    #     device_id = response_data_json.get("device_id", None)
+                    #     afe = self.afe.get(device_id, None)
+                    #     if afe is None:
+                    #         self.afe.update({device_id: AFE(device_id)})
+                    #         afe = self.afe.get(device_id, None)
+                        
+                        # print(response_data_json)
+                        
+                        # toAppend = response_data_json.get("retval", None)
+                        # if toAppend and isinstance(toAppend, dict):
+                        #     for k, v_measurement_dict in toAppend.items():
+                        #         if not isinstance(v_measurement_dict, dict):
+                        #             # self.response_text_queue.put((tk.END, f"Warning: Expected dict for measurement {k}, got {type(v_measurement_dict)}"))
+                        #             print(f"Warning: Expected dict for measurement {k}, got {type(v_measurement_dict)}")
+                        #             continue
+                                
+                        #         v_measurement_dict["device_id"] = device_id
+                        #         v_measurement_dict["gui_timestamp"] = gui_timestamp
+                        #         v_measurement_dict["gui_datetime"] = pd.to_datetime(v_measurement_dict["gui_timestamp"], unit='s')
+
+                        #         # Store raw measurement data in AFE object
+                        #         if k not in self.afe[device_id].measurements:
+                        #             self.afe[device_id].measurements[k] = []
+                        #         self.afe[device_id].measurements[k].append(v_measurement_dict)
+
+                        #         df = pd.DataFrame([v_measurement_dict])
+
+                        #         if k in self.data_to_plot[device_id]:
+                        #             self.data_to_plot[device_id][k] = pd.concat(
+                        #                 [self.data_to_plot[device_id][k], df], ignore_index=True
+                        #             )
+                        #         elif k == 'config': # Handle config data separately
+                        #                 config_data = v_measurement_dict # This is the dict, not a DataFrame
+                        #                 if config_data:
+                        #                     self.master.after(0, lambda: self.show_settings_popup(config_data))
+                        #                 else:
+                        #                     self.response_text_queue.put((tk.END, f"Warning: Empty config data received for device {device_id}.\n"))
+
+                        #                 # Since 'config' is not a measurement, don't store it as one
+                        #                 continue
+                        #         else: # First time seeing this measurement type
+                        #             # If not 'config', proceed to store the measurement
+                        #             # This branch is for initial DataFrame creation
+
+                        #             self.data_to_plot[device_id][k] = df
+                                
+                        #         self.data_to_plot[device_id][k].sort_values(by="gui_timestamp", inplace=True)
+                        #     self.plot_data_changed = True
+                        
+                        # if device_id and device_id in self.afe: # Ensure device_id is valid and AFE object exists
+                        #     if device_id not in self.data_to_plot:
+                        #         self.data_to_plot[device_id] = {}
+                            
+                            
+                        #     toAppend = response_data_json.get("retval", None)
+                        #     if toAppend and isinstance(toAppend, dict):
+                        #         for k, v_measurement_dict in toAppend.items():
+                        #             if not isinstance(v_measurement_dict, dict):
+                        #                 # self.response_text_queue.put((tk.END, f"Warning: Expected dict for measurement {k}, got {type(v_measurement_dict)}"))
+                        #                 print(f"Warning: Expected dict for measurement {k}, got {type(v_measurement_dict)}")
+                        #                 continue
                                     
-                                    self.data_to_plot[device_id][k].sort_values(by="gui_timestamp", inplace=True)
-                                self.plot_data_changed = True
+                        #             v_measurement_dict["device_id"] = device_id
+                        #             v_measurement_dict["gui_timestamp"] = gui_timestamp
+                        #             v_measurement_dict["gui_datetime"] = pd.to_datetime(v_measurement_dict["gui_timestamp"], unit='s')
+
+                        #             # Store raw measurement data in AFE object
+                        #             if k not in self.afe[device_id].measurements:
+                        #                 self.afe[device_id].measurements[k] = []
+                        #             self.afe[device_id].measurements[k].append(v_measurement_dict)
+
+                        #             df = pd.DataFrame([v_measurement_dict])
+
+                        #             if k in self.data_to_plot[device_id]:
+                        #                 self.data_to_plot[device_id][k] = pd.concat(
+                        #                     [self.data_to_plot[device_id][k], df], ignore_index=True
+                        #                 )
+                        #             elif k == 'config': # Handle config data separately
+                        #                     config_data = v_measurement_dict # This is the dict, not a DataFrame
+                        #                     if config_data:
+                        #                         self.master.after(0, lambda: self.show_settings_popup(config_data))
+                        #                     else:
+                        #                         self.response_text_queue.put((tk.END, f"Warning: Empty config data received for device {device_id}.\n"))
+
+                        #                     # Since 'config' is not a measurement, don't store it as one
+                        #                     continue
+                        #             else: # First time seeing this measurement type
+                        #                 # If not 'config', proceed to store the measurement
+                        #                 # This branch is for initial DataFrame creation
+
+                        #                 self.data_to_plot[device_id][k] = df
+                                    
+                        #             self.data_to_plot[device_id][k].sort_values(by="gui_timestamp", inplace=True)
+                        #         self.plot_data_changed = True
+                                
                     # Other procedures that return data can be handled here similarly.
                     # The original code had specific self.hub.receive() calls for some procedures after send.
                     # This is now handled by HubInterface.send(waitForResponseData=True).
@@ -430,110 +590,84 @@ class App:
         # Clear previous plots by destroying all widgets in the main plot frame
         for widget in self.plot_main_frame.winfo_children():
             widget.destroy()
+        
+        toPlot = []
+        for afe in self.afe.values():
+            toAppend = afe.measurements.get("last_data", None)
+            if toAppend is not None:
+                toAppend["device_id"] = afe.afe_id
+                toPlot.append(toAppend)
+        # print(toPlot)
+        toPlot = pd.concat(toPlot,ignore_index=True)
+        toPlot.sort_values(by="gui_timestamp", inplace=True)
+        columns_to_plot = [
+            'U_SIPM_MEAS0', 'U_SIPM_MEAS1',
+            'I_SIPM_MEAS0', 'I_SIPM_MEAS1',
+            'TEMP_EXT', 'TEMP_LOCAL'
+        ]
+        
+        column_name_base = {
+            "TEMP": 0,
+            "U_SIPM": 1, 
+            "I_SIPM": 2
+        }
 
-        if self.data_to_plot:
-            columns_to_plot = [
-                # 'calculation_timestamp_ms',
-                # 'timestamp_ms',
-                # 'DC_LEVEL_MEAS0', 'DC_LEVEL_MEAS1',
-                'U_SIPM_MEAS0', 'U_SIPM_MEAS1',
-                'I_SIPM_MEAS0', 'I_SIPM_MEAS1',
-                'TEMP_EXT', 'TEMP_LOCAL'
-            ]
-            
-            figures_created = [] # Keep track of figures to close them later
+        figures_created = []
+        fig, axes = plt.subplots(3, 1, sharex=True, figsize=(7, 8))
+        figures_created.append(fig)
+        time_column = "gui_timestamp"
 
-            # Create a new figure and axes for each data type (e.g., 'last_data') per device
-            fig, axes = plt.subplots(3, 1, sharex=True, figsize=(7, 8)) # 3 rows, 1 column
-            figures_created.append(fig) # Add figure to list for closing
-            color_map = plt.colormaps.get_cmap('tab20')
-            # time_column = "timestamp_ms"
-            # time_column = "timestamp_datetime"
-            time_column = "gui_timestamp"
-            plot_color_idx = 0
-            for device_id, device_data_types in self.data_to_plot.items():
-                for data_name, df in device_data_types.items():
-                    if df.empty:
-                        continue # Skip empty DataFrames
+        # Loop through each group of columns
+        for col_name, ax_idx in column_name_base.items():
+            m = "LOCAL" if col_name == "TEMP" else "MEAS0"
+            s = "EXT" if col_name == "TEMP" else "MEAS1"
 
-                    # fig.suptitle(f"AFE {device_id} - {data_name}", fontsize=10)
-                    
-                    if time_column not in df.columns:
-                        print(f"Warning: Time column '{time_column}' not in DataFrame for {device_id} - {data_name}")
-                        continue
-                    if "ms" in time_column:
-                        axes[-1].set_xlabel(f"{time_column} (ms)")
-                    elif "datetime" in time_column:
-                        axes[-1].set_xlabel(f"{time_column}")
-                    else:
-                        axes[-1].set_xlabel(time_column)
-                                            
-                    for col_name in columns_to_plot:
-                        if col_name not in df.columns:
-                            continue
-                        color = plot_color_idx
-                        ax_idx = -1
-                        if "TEMP" in col_name:
-                            ax_idx = 0
-                            if "EXT" in col_name: color = color + 1
-                        elif "U_SIPM" in col_name:
-                            ax_idx = 1
-                            if "MEAS1" in col_name: color = color + 1
-                        elif "I_SIPM" in col_name:
-                            ax_idx = 2
-                            if "MEAS1" in col_name: color = color + 1
-                        
-                        if ax_idx != -1:
-                            axes[ax_idx].plot(df[time_column], df[col_name], 
-                                              color=color_map(color), label=f"AFE{device_id} {col_name}", marker='o', linestyle='-') # Add markers
-                            # # axes[ax_idx].set_ylabel(col_name.replace("_", " "), fontsize=8)
-                            # axes[ax_idx].tick_params(axis='y', labelsize=7)
-                            # axes[ax_idx].grid(True, linestyle=':', alpha=0.7)
-                    
-                plot_color_idx += 2
-                
-            for ax_obj in axes:
-                if ax_obj.has_data(): # Only add legend if there's data plotted on this axis
-                    ax_obj.legend(loc='upper left', fontsize='x-small')
-                    ax_obj.tick_params(axis='x', labelsize=7)
-                    ax_obj.grid(True, linestyle=':', alpha=0.7)
-            axes[0].set_ylabel(r"TEMP [$^{\circ}$C]")
-            axes[1].set_ylabel(r"U SiPM [V]")
-            axes[2].set_ylabel(r"I SiPM [A]")
-            fig.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust for suptitle and xlabel
-            # Embed the matplotlib figure into the Tkinter frame
-            canvas_agg = FigureCanvasTkAgg(fig, master=self.plot_main_frame)
-            canvas_agg.draw()
-            # Pack the canvas widget into the main plot frame
-            canvas_agg.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+            m_col = f"{col_name}_{m}"
+            s_col = f"{col_name}_{s}"
 
-            # Close all matplotlib figures created during this call to free memory
-            for fig_to_close in figures_created:
-                plt.close(fig_to_close)
+            if m_col in toPlot.columns and s_col in toPlot.columns:
+                # Melt the dataframe to long-form
+                melted = pd.melt(
+                    toPlot,
+                    id_vars=["gui_timestamp", "device_id"],
+                    value_vars=[m_col, s_col],
+                    var_name="measurement_type",
+                    value_name="value"
+                )
 
-            # print(data)
-            # data = self.data_to_plot
-            # print(data)
+                # Plot using measurement_type for style (e.g., MEAS0 vs MEAS1)
+                sns.lineplot(
+                    data=melted,
+                    x="gui_timestamp",
+                    y="value",
+                    hue="device_id",
+                    style="measurement_type",
+                    markers=True,
+                    dashes={
+                        m_col: "",    # solid for MEAS0/LOCAL
+                        s_col: (2, 2) # dashed for MEAS1/EXT
+                    },
+                    ax=axes[ax_idx]
+                )
+        # Customize plot appearance and labels
+        axes[0].set_ylabel(r"TEMP [°C]")
+        axes[1].set_ylabel(r"U SiPM [V]")
+        axes[2].set_ylabel(r"I SiPM [A]")
 
-        # if "retval" in data and "last_data" in data["retval"]:
-        #     print(data["retval"])
-        #     # last_data = data["retval"]["last_data"]
-        #     # measurements = ["U_SIPM_MEAS0", "U_SIPM_MEAS1",
-        #     #                 "I_SIPM_MEAS0", "I_SIPM_MEAS1"]  # Example measurements
-        #     # x = list(range(len(measurements)))
-        #     # y = [last_data.get(key, 0) for key in measurements]
+        for ax in axes:
+            if ax.has_data():
+                ax.legend(loc='upper left', fontsize='x-small')
+            ax.tick_params(axis='x', labelsize=7)
+            ax.grid(True, linestyle=':', alpha=0.7)
 
-        #     # # Basic bar chart (you can customize this further)
-        #     # bar_width = 50
-        #     # x_offset = 50
-        #     # y_offset = 50
-        #     # max_value = max(y) if y else 1
+        fig.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-        #     # for i, value in enumerate(y):
-        #     #     bar_height = (value / max_value) * 200  # Scale to 200 pixels
-        #     #     self.canvas.create_rectangle(x_offset + i * (bar_width + 20), 250 - bar_height,
-        #     #                                 x_offset + (i + 1) * bar_width + i * 20, 250, fill="blue")
-        #     #     self.canvas.create_text(x_offset + i * (bar_width + 20) + bar_width / 2, 260, text=measurements[i], anchor=tk.N)
+        # Embed plot in Tkinter frame
+        canvas_agg = FigureCanvasTkAgg(fig, master=self.plot_main_frame)
+        canvas_agg.draw()
+        canvas_agg.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        plt.close(fig)
 
     async def _auto_get_data_loop(self, interval_seconds):
         """Asyncio task for periodically fetching data."""
@@ -625,7 +759,101 @@ class App:
                 except ValueError:
                     self.response_text_queue.put((tk.END, f"Invalid AFE ID for 'Get Data All': {afe_id_str}\n"))
         else:
-            self.response_text_queue.put((tk.END, "No AFE IDs known. Press 'Get Config' first.\n"))
+            self.response_text_queue.put((tk.END, "No AFE IDs known. Press 'Get Config' first.\n")) 
+
+
+    def show_settings_popup_by_id(self):
+        if not self.afe_id:
+            self.response_text_queue.put((tk.END, "Select an AFE ID first.\n"))
+            return
+
+        afe = self.afe.get(str(self.afe_id), None)
+        # if afe_id not in self.data_to_plot or "config" not in self.data_to_plot[afe_id]:
+        #     self.response_text_queue.put((tk.END, f"No settings data available for AFE ID {afe_id}.\n"))
+        #     return
+
+        # settings_data = self.data_to_plot[afe_id]["config"].iloc[-1].to_dict() # Get the last config data
+        settings_data = afe.config
+        self.show_settings_popup(settings_data)
+
+    def show_settings_popup(self, settings_data):
+        
+        """Displays a popup window with AFE settings, handling missing sections."""
+        popup = tk.Toplevel(self.master)
+        popup.title(f"AFE Settings (ID: {settings_data.get('ID', 'N/A')})")
+
+        settings = settings_data
+
+        master_settings = settings.get("M", {})
+        slave_settings = settings.get("S", {})
+
+        if not master_settings and not slave_settings:
+            tk.Label(popup, text="No settings data available.").pack(pady=10)
+            return  # Exit if no settings are found
+
+        # Get all unique keys from both master and slave settings
+        all_keys = sorted(list(set(master_settings.keys()) | set(slave_settings.keys())))
+
+        # Create a frame for the table-like layout
+        table_frame = tk.Frame(popup)
+        table_frame.pack(padx=10, pady=10)
+
+        # Header row
+        tk.Label(table_frame, text="Setting", font=("Arial", 10, "bold")).grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        tk.Label(table_frame, text="Master (M)", font=("Arial", 10, "bold")).grid(row=0, column=1, padx=5, pady=2, sticky="w")
+        tk.Label(table_frame, text="Slave (S)", font=("Arial", 10, "bold")).grid(row=0, column=2, padx=5, pady=2, sticky="w")
+
+        # Data rows
+        for i, key in enumerate(all_keys):
+            row_num = i + 1
+            tk.Label(table_frame, text=key, font=("Arial", 9)).grid(row=row_num, column=0, padx=5, pady=1, sticky="w")
+
+            master_value = master_settings.get(key, "N/A")
+            slave_value = slave_settings.get(key, "N/A")
+
+            tk.Label(table_frame, text=str(master_value), font=("Arial", 9)).grid(row=row_num, column=1, padx=5, pady=1, sticky="w")
+            tk.Label(table_frame, text=str(slave_value), font=("Arial", 9)).grid(row=row_num, column=2, padx=5, pady=1, sticky="w")
+
+        # # Use .get() with default {} to safely access nested dicts, handling missing 'M' or 'S'
+        # if "M" in settings and "S" in settings:  # Both Master and Slave settings are present
+        #     setting_groups = {"Master (M)": settings["M"], "Slave (S)": settings["S"]}
+        # elif "M" in settings:
+        #     setting_groups = {"Master (M)": settings["M"]}
+        # elif "S" in settings:
+        #     setting_groups = {"Slave (S)": settings["S"]}
+        # else:
+        #     tk.Label(popup, text="No settings data available.").pack(pady=10)
+        #     return  # Exit if no settings are found
+
+        # for group_name, group_settings in setting_groups.items():
+        #     tk.Label(popup, text=group_name, font=("Arial", 12, "bold")).pack(pady=5)
+        #     for key, value in group_settings.items():
+        #         setting_str = f"{key}: {value}"
+        #         setting_label = tk.Label(popup, text=setting_str)
+        #         setting_label.pack(anchor="w", padx=10, pady=2)
+
+        close_button = tk.Button(popup, text="Close", command=popup.destroy)
+        close_button.pack(pady=10)
+
+    def set_hv_voltage(self):
+        """Sends a command to set the HV voltage for the selected AFE."""
+        try:
+            print("Set HV Voltage - AFE_ID", self.afe_id_var.get())
+            afe_id = int(self.afe_id_var.get())
+            voltage = float(self.hv_voltage_entry.get())
+            mode = self.hv_mode_options.get(self.hv_mode_var.get())
+            command_json = {
+                "afe_id": afe_id,
+                "procedure": "afe_set_sipm_voltage_si",
+                "voltage": voltage,
+                "afe_subdevice": mode
+            }
+            print("command_json", command_json)
+            self.send_predefined_command(command_json)
+        except ValueError:
+            self.response_text_queue.put((tk.END, "Invalid AFE ID or Voltage value.\n"))
+        except Exception as e:
+            self.response_text_queue.put((tk.END, f"Error setting HV voltage: {e}\n"))
     def update_selected_afe_id(self, *args):
         """Updates the self.afe_id attribute when the dropdown selection changes."""
         self.afe_id = self.afe_id_var.get()
@@ -660,6 +888,7 @@ class App:
             for afe_id_str in self.afe_id_new_list:
                 menu.add_command(label=afe_id_str, command=tk._setit(
                     self.afe_id_var, afe_id_str))
+            self.afe_id_new_list = None  # Clear the new list after processing
         # else:
         #     self.afe_id_var.set("N/A")  # No AFEs found
         #     menu = self.afe_id_dropdown["menu"]
@@ -672,7 +901,7 @@ class App:
             if self.plot_window and tk.Toplevel.winfo_exists(self.plot_window): # Only plot if window is open
                 self.plot()
             self.plot_data_changed = False # Reset flag after plotting attempt
-        if self.app_running: # Continue polling only if app is running
+        if self.app_running: # Continue polling only if app is running and not closing
             self.master.after(100, self.update_gui)  # Poll every 100ms
 
 
