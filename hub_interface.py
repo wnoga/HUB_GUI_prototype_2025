@@ -298,6 +298,11 @@ class App:
         self.show_settings_button = tk.Button(
             self.buttons_frame, text="Show Settings", command=self.show_settings_popup_by_id)
         self.show_settings_button.pack(side=tk.LEFT)
+        
+        
+        self.show_settings_button = tk.Button(
+            self.buttons_frame, text="Get status", command=lambda: self.send_predefined_command({"afe_id": int(self.afe_id_var.get()), "procedure": "afe_get_subdevice_status", "subdevice_mask": 0x03}))
+        self.show_settings_button.pack(side=tk.LEFT)
 
 
         # Add controls for setting HV voltage
@@ -423,7 +428,6 @@ class App:
             if response.get("status") == "OK" and response.get("data"):
                 response_data_str = response["data"]
                 try:
-
                     response_data_json = json.loads(response_data_str)
                     if procedure == "get_all_afe_configuration":
                         # print(response_data_json)
@@ -556,7 +560,7 @@ class App:
                     # If a procedure has a more complex multi-stage response, HubInterface or this handler would need adjustment.
 
                 except json.JSONDecodeError as e:
-                    self.response_text_queue.put((tk.END, f"Error decoding JSON response for {command_str}: {e}\nData: {response_data_str[:200]}\n"))
+                    self.response_text_queue.put((tk.END, f"Error decoding JSON response for {command_str} [{response_data_str}]: {e}\nData: {response_data_str[:200]}\n"))
                 except TypeError: # If response["data"] is None or not string
                     self.response_text_queue.put((tk.END, f"No data or invalid data type in response for {command_str}\n"))
             elif response.get("status") == "ERROR":
