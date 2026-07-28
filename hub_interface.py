@@ -11,7 +11,7 @@ import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import argparse
 import seaborn as sns
-
+import datetime
 
 class HubInterface:
     """
@@ -421,7 +421,9 @@ class App:
             )
             gui_timestamp = time.time()
             self.response_text_queue.put(
-                (tk.END, f"Sent: {command_str} -> {response.get("status", "ERROR")}\n"))
+                (tk.END, f"{datetime.datetime.utcnow()} @ Sent: {command_str} -> {response.get("status", "ERROR")}\n"))
+            self.response_text_queue.put(
+                (tk.END, f"{datetime.datetime.utcnow()} @ Recieved: {command_str} -> {response}\n"))
             
             procedure = command_json.get("procedure", None)
             # print(f"Procedure: {procedure} -> {response}")
